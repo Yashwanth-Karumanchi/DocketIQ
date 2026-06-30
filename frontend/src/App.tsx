@@ -286,7 +286,6 @@ function App() {
   const [graphData, setGraphData] = useState<GraphData>({ nodes: [], edges: [] });
   const [suggestions, setSuggestions] = useState<any[]>([]);
 
-  const [caseReports, setCaseReports] = useState<any[]>([]);
   const [agentRuns, setAgentRuns] = useState<any[]>([]);
   const [allAgentRuns, setAllAgentRuns] = useState<any[]>([]);
   const [allReports, setAllReports] = useState<any[]>([]);
@@ -504,14 +503,17 @@ function App() {
 
   const loadReports = async (caseId: string) => {
     const res = await fetch(`/api/dashboard/cases/${caseId}/reports`, {
-      credentials: "include",
+        credentials: "include",
     });
 
     if (!res.ok) {
-      setCaseReports([]);
-      setAgentRuns([]);
-      return;
+        setAgentRuns([]);
+        return;
     }
+
+    const data = await res.json();
+    setAgentRuns(data.agentRuns || []);
+    };
 
     const data = await res.json();
     setCaseReports(data.reports || []);
