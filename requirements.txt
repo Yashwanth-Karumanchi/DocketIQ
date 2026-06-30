@@ -1,4 +1,14 @@
 fastapi==0.115.6
 uvicorn==0.34.0
 python-dotenv==1.0.1
-pydantic
+pydantic==2.13.4
+sqlalchemy==2.0.36
+psycopg2-binary==2.9.12
+python-jose==3.3.0
+cryptography==44.0.0
+requests==2.32.3
+python-multipart==0.0.20
+pypdf==5.1.0
+google-genai==1.47.0
+reportlab==4.2.5
+pydantic[email]
