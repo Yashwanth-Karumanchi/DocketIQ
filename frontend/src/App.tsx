@@ -503,20 +503,15 @@ function App() {
 
   const loadReports = async (caseId: string) => {
     const res = await fetch(`/api/dashboard/cases/${caseId}/reports`, {
-        credentials: "include",
+      credentials: "include",
     });
 
     if (!res.ok) {
-        setAgentRuns([]);
-        return;
+      setAgentRuns([]);
+      return;
     }
 
     const data = await res.json();
-    setAgentRuns(data.agentRuns || []);
-    };
-
-    const data = await res.json();
-    setCaseReports(data.reports || []);
     setAgentRuns(data.agentRuns || []);
   };
 
@@ -2083,5 +2078,6 @@ function App() {
       </div>
     </>
   );
+}
 
 export default App;
