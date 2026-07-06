@@ -661,6 +661,106 @@ def runCaseRelationshipAgent(
     verifyCaseAccess(db, currentUser, caseId)
 
     caseOverview = getCaseOverview(db, caseId)
+
+    existingRows = db.execute(
+        text("""
+            select
+              cr.id,
+              cr.relationship_type,
+              cr.description,
+              cr.strength,
+              case
+                when cr.source_case_id = :case_id then target_case.case_number
+                else source_case.case_number
+              end as target_case_number,
+              case
+                when cr.source_case_id = :case_id then target_case.title
+                else source_case.title
+              end as target_case_title,
+              case
+                when cr.source_case_id = :case_id then target_client.full_name
+                else source_client.full_name
+              end as target_client_name,
+              case
+                when cr.source_case_id = :case_id then target_case.insurance_company
+                else source_case.insurance_company
+              end as target_insurance_company
+            from case_relationships cr
+            join cases source_case on source_case.id = cr.source_case_id
+            join clients source_client on source_client.id = source_case.client_id
+            join cases target_case on target_case.id = cr.target_case_id
+            join clients target_client on target_client.id = target_case.client_id
+            join case_users cu on cu.case_id = case
+              when cr.source_case_id = :case_id then cr.target_case_id
+              else cr.source_case_id
+            end
+            where (cr.source_case_id = :case_id or cr.target_case_id = :case_id)
+              and cu.user_id = :user_id
+            order by cr.strength desc nulls last, cr.created_at desc
+            limit 20
+        """),
+        {
+            "case_id": caseId,
+            "user_id": str(currentUser.id),
+        },
+    ).mappings().all()
+
+    relationships = []
+    for row in existingRows:
+        relationships.append({
+            "targetCaseNumber": row["target_case_number"],
+            "targetCaseTitle": row["target_case_title"],
+            "targetClientName": row["target_client_name"],
+            "relationshipType": row["relationship_type"],
+            "strength": row["strength"],
+            "confidence": "High" if int(row["strength"] or 0) >= 80 else "Medium",
+            "description": row["description"],
+            "operationalValue": "Useful for comparing similar intake patterns, missing-document workflows, insurer follow-up, and case readiness risks.",
+            "insuranceCompany": row["target_insurance_company"],
+        })
+
+    if relationships:
+        data = {
+            "reportTitle": "Case Relationship Review",
+            "executiveSummary": (
+                f"Case {caseOverview.get('case_number')} has {len(relationships)} connected case records "
+                "in the structured case relationship database. These relationships are based on shared case category, "
+                "insurer pattern, missing-document profile, and operational readiness similarities."
+            ),
+            "relationships": relationships,
+            "noRelationshipFindings": [],
+            "recommendedActions": [
+                "Review connected cases for similar missing-document patterns.",
+                "Compare insurer follow-up status across related cases.",
+                "Use the connected cases as operational references before attorney handoff."
+            ],
+            "limitations": "This review uses structured relationship records already stored in the database.",
+            "insertedRelationshipCount": 0,
+        }
+
+        saveAgentRun(
+            db=db,
+            currentUser=currentUser,
+            caseId=caseId,
+            agentName="case_relationship",
+            resultSummary=data["executiveSummary"],
+            resultPayload=data,
+        )
+
+        saveAudit(
+            db=db,
+            currentUser=currentUser,
+            caseId=caseId,
+            action="case_relationships_reviewed",
+            details={
+                "relationshipCount": len(relationships),
+                "source": "existing_case_relationships",
+            },
+        )
+
+        db.commit()
+        return data
+
     otherCases = getAccessibleCases(db, currentUser, caseId)
     documentContext = getCaseDocumentContext(db, caseId, limit=20)
 
@@ -669,20 +769,23 @@ You are DocketIQ's Case Relationship Analyst.
 
 Compare the selected case against other cases the user can access.
 
+Important:
+- You must return exact targetCaseNumber values from the provided other accessible cases.
+- Do not invent case numbers.
+- If there are no strong relationships, return an empty relationships list.
+- Do not delete or overwrite database relationships.
+- Do not provide legal advice.
+
 Find possible operational relationships such as:
 - Same client
 - Same accident date
 - Same insurance company
 - Same claim number
-- Same provider
-- Same vehicle/property damage context
-- Shared witness or location
-- Duplicate or related intake
+- Same incident category
+- Similar missing-document profile
+- Similar case-readiness risk
+- Related intake workflow
 
-Do not expose unauthorized case data.
-Do not provide legal advice.
-Do not overstate weak relationships.
-Use confidence and clear reasoning.
 Return only valid JSON.
 
 JSON shape:
@@ -691,9 +794,9 @@ JSON shape:
   "executiveSummary": "professional paragraph",
   "relationships": [
     {{
-      "targetCaseNumber": "CL-24245571",
+      "targetCaseNumber": "CL-24245540",
       "relationshipType": "Same insurer",
-      "strength": 2,
+      "strength": 80,
       "confidence": "Medium",
       "description": "professional explanation",
       "operationalValue": "why this relationship helps case management"
@@ -721,14 +824,6 @@ Selected case document context:
     raw = generateText(prompt)
     data = parseJsonObject(raw)
 
-    db.execute(
-        text("""
-            delete from case_relationships
-            where source_case_id = :case_id
-        """),
-        {"case_id": caseId},
-    )
-
     insertedRelationships = 0
 
     for relationship in data.get("relationships", []):
@@ -755,6 +850,25 @@ Selected case document context:
         if not target:
             continue
 
+        exists = db.execute(
+            text("""
+                select id
+                from case_relationships
+                where
+                  (source_case_id = :source_case_id and target_case_id = :target_case_id)
+                  or
+                  (source_case_id = :target_case_id and target_case_id = :source_case_id)
+                limit 1
+            """),
+            {
+                "source_case_id": caseId,
+                "target_case_id": str(target["id"]),
+            },
+        ).mappings().first()
+
+        if exists:
+            continue
+
         db.execute(
             text("""
                 insert into case_relationships (
@@ -777,7 +891,7 @@ Selected case document context:
                 "target_case_id": str(target["id"]),
                 "relationship_type": relationship.get("relationshipType", "Related case"),
                 "description": relationship.get("description", ""),
-                "strength": int(relationship.get("strength", 1) or 1),
+                "strength": int(relationship.get("strength", 50) or 50),
             },
         )
 

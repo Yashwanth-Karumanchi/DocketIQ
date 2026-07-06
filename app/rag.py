@@ -197,6 +197,53 @@ def getCaseOperationalContext(db: Session, currentUser: User, caseId: str) -> st
         {"case_id": caseId},
     ).mappings().all()
 
+    connectedRows = db.execute(
+        text("""
+            select
+              cr.id,
+              cr.relationship_type,
+              cr.description,
+              cr.strength,
+              case
+                when cr.source_case_id = :case_id then target_case.case_number
+                else source_case.case_number
+              end as connected_case_number,
+              case
+                when cr.source_case_id = :case_id then target_case.title
+                else source_case.title
+              end as connected_case_title,
+              case
+                when cr.source_case_id = :case_id then target_client.full_name
+                else source_client.full_name
+              end as connected_client_name,
+              case
+                when cr.source_case_id = :case_id then target_case.insurance_company
+                else source_case.insurance_company
+              end as connected_insurance_company,
+              case
+                when cr.source_case_id = :case_id then target_case.claim_number
+                else source_case.claim_number
+              end as connected_claim_number
+            from case_relationships cr
+            join cases source_case on source_case.id = cr.source_case_id
+            join clients source_client on source_client.id = source_case.client_id
+            join cases target_case on target_case.id = cr.target_case_id
+            join clients target_client on target_client.id = target_case.client_id
+            join case_users cu on cu.case_id = case
+              when cr.source_case_id = :case_id then cr.target_case_id
+              else cr.source_case_id
+            end
+            where (cr.source_case_id = :case_id or cr.target_case_id = :case_id)
+              and cu.user_id = :user_id
+            order by cr.strength desc nulls last, cr.created_at desc
+            limit 20
+        """),
+        {
+            "case_id": caseId,
+            "user_id": str(currentUser.id),
+        },
+    ).mappings().all()
+
     memorySummary = getChatMemory(db, currentUser, caseId)
 
     context = {
@@ -205,6 +252,7 @@ def getCaseOperationalContext(db: Session, currentUser: User, caseId: str) -> st
         "timeline": [dict(row) for row in timelineRows],
         "calendarEvents": [dict(row) for row in calendarRows],
         "pendingActions": [dict(row) for row in pendingRows],
+        "connectedCases": [dict(row) for row in connectedRows],
         "privateCaseMemory": memorySummary,
     }
 
@@ -612,8 +660,9 @@ Use ALL available case context:
 3. Timeline events
 4. Calendar events
 5. Pending actions
-6. Private user/case memory
-7. Uploaded document excerpts, if any are available
+6. Connected cases and relationship records
+7. Private user/case memory
+8. Uploaded document excerpts, if any are available
 
 Rules:
 - The user is asking about the selected case unless they explicitly name another case.
