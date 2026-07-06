@@ -10,6 +10,7 @@ from app.models import User
 from app.permissions import verifyCaseAccess
 from app.gmail_tool import sendGmailEmail
 from app.calendar_tool import createCalendarEvent
+from app.db_action_tool import executeDatabaseAction
 
 router = APIRouter(prefix="/api/actions", tags=["actions"])
 
@@ -189,6 +190,17 @@ def confirmAction(
         )
 
         message = "Calendar event created successfully from your Google Calendar."
+
+    elif str(action["action_type"]).startswith("db_"):
+        result = executeDatabaseAction(
+            db=db,
+            currentUser=currentUser,
+            caseId=caseId,
+            actionType=action["action_type"],
+            payload=payload,
+        )
+
+        message = result.get("message", "Database action completed successfully.")
 
     else:
         raise HTTPException(status_code=400, detail="Unsupported action type")

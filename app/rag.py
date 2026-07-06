@@ -485,6 +485,43 @@ Dashboard context:
         "firewall": firewall.model_dump(),
     }
     
+
+def isDataManagementIntent(message: str) -> bool:
+    lowered = message.lower()
+
+    dataWords = [
+        "add task",
+        "create task",
+        "update task",
+        "change task",
+        "mark task",
+        "mark the",
+        "complete task",
+        "close task",
+        "delete task",
+        "remove task",
+        "change priority",
+        "update priority",
+        "change status",
+        "update status",
+        "update summary",
+        "change summary",
+        "add timeline",
+        "create timeline",
+        "timeline event",
+        "connect this case",
+        "connect case",
+        "connected to",
+        "disconnect",
+        "remove connection",
+        "delete connection",
+        "add communication suggestion",
+        "create communication suggestion",
+    ]
+
+    return any(word in lowered for word in dataWords)
+
+
 @router.post("/cases/{caseId}/chat")
 def chatWithCase(
     caseId: str,
@@ -633,6 +670,115 @@ def chatWithCase(
             "pendingAction": pendingAction,
         }
 
+    if isDataManagementIntent(payload.message):
+        actionResult = createPendingActionFromMessage(
+            db=db,
+            currentUser=currentUser,
+            caseId=caseId,
+            userMessage=payload.message,
+        )
+
+        if actionResult.get("needsClarification"):
+            answer = actionResult["message"]
+
+            db.execute(
+                text("""
+                    insert into agent_messages (
+                      user_id,
+                      case_id,
+                      user_message,
+                      assistant_message,
+                      sources
+                    )
+                    values (
+                      :user_id,
+                      :case_id,
+                      :user_message,
+                      :assistant_message,
+                      cast(:sources as jsonb)
+                    )
+                """),
+                {
+                    "user_id": str(currentUser.id),
+                    "case_id": caseId,
+                    "user_message": payload.message,
+                    "assistant_message": answer,
+                    "sources": json.dumps([]),
+                },
+            )
+
+            db.commit()
+
+            return {
+                "answer": answer,
+                "sources": [],
+                "firewall": firewall.model_dump(),
+            }
+
+        pendingAction = actionResult["pendingAction"]
+        answer = (
+            "I prepared this case-data update for your review. "
+            "Please confirm before I change the database.\n\n"
+            + pendingAction["preview"]
+        )
+
+        db.execute(
+            text("""
+                insert into agent_messages (
+                  user_id,
+                  case_id,
+                  user_message,
+                  assistant_message,
+                  sources
+                )
+                values (
+                  :user_id,
+                  :case_id,
+                  :user_message,
+                  :assistant_message,
+                  cast(:sources as jsonb)
+                )
+            """),
+            {
+                "user_id": str(currentUser.id),
+                "case_id": caseId,
+                "user_message": payload.message,
+                "assistant_message": answer,
+                "sources": json.dumps([]),
+            },
+        )
+
+        db.execute(
+            text("""
+                insert into audit_logs (user_id, action, entity_type, entity_id, details)
+                values (:user_id, 'pending_db_action_created', 'case', :case_id, cast(:details as jsonb))
+            """),
+            {
+                "user_id": str(currentUser.id),
+                "case_id": caseId,
+                "details": json.dumps({
+                    "pendingActionId": pendingAction["id"],
+                    "type": pendingAction["type"],
+                }),
+            },
+        )
+
+        updateChatMemory(
+            db=db,
+            currentUser=currentUser,
+            caseId=caseId,
+            userMessage=payload.message,
+            assistantMessage=answer,
+        )
+
+        db.commit()
+
+        return {
+            "answer": answer,
+            "sources": [],
+            "firewall": firewall.model_dump(),
+            "pendingAction": pendingAction,
+        }
     chunks = retrieveCaseChunks(db, caseId, payload.message)
 
     contextBlocks = []
