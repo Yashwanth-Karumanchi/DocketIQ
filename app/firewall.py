@@ -1,6 +1,8 @@
 from typing import Literal
 from pydantic import BaseModel
+
 from app.llm import generateText, parseJsonObject
+
 
 class FirewallResult(BaseModel):
     decision: Literal[
@@ -8,137 +10,180 @@ class FirewallResult(BaseModel):
         "allow_with_limits",
         "ask_clarifying",
         "refuse",
-        "require_confirmation"
+        "require_confirmation",
     ]
     riskLevel: Literal["low", "medium", "high"]
     reason: str
     allowedTools: list[str]
 
+
+def hasAny(message: str, words: list[str]) -> bool:
+    return any(word in message for word in words)
+
+
 def runFirewall(userMessage: str) -> FirewallResult:
     message = userMessage.lower().strip()
 
-    externalActionWords = [
-        "send email",
-        "send mail",
-        "email the",
-        "mail the",
-        "schedule",
-        "calendar",
-        "invite",
-        "create meeting",
-        "book meeting",
-        "set up meeting",
-        "set up a call",
+    dangerousDataWords = [
+        "delete all",
+        "remove all",
+        "drop table",
+        "truncate",
+        "wipe database",
+        "delete database",
+        "delete every",
+        "delete client",
+        "delete case",
+        "remove client",
+        "remove case",
+        "change user",
+        "change permission",
+        "make admin",
+        "delete audit",
+        "remove audit",
+        "raw sql",
+        "run sql",
     ]
 
-    unsafeWords = [
-        "fake",
-        "fabricate",
-        "exaggerate",
-        "lie",
-        "alter evidence",
-        "make injuries sound worse",
-        "hide evidence",
+    if hasAny(message, dangerousDataWords):
+        return FirewallResult(
+            decision="refuse",
+            riskLevel="high",
+            reason="This request attempts a destructive or administrative database operation that is not allowed through chat.",
+            allowedTools=[],
+        )
+
+    dbActionWords = [
+        "add task",
+        "create task",
+        "update task",
+        "change task",
+        "mark task",
+        "mark the",
+        "complete task",
+        "close task",
+        "delete task",
+        "remove task",
+        "change priority",
+        "update priority",
+        "change status",
+        "update status",
+        "update summary",
+        "change summary",
+        "add timeline",
+        "create timeline",
+        "timeline event",
+        "connect this case",
+        "connect case",
+        "connected to",
+        "connect with",
+        "disconnect",
+        "remove connection",
+        "delete connection",
+        "add communication suggestion",
+        "create communication suggestion",
     ]
+
+    if hasAny(message, dbActionWords):
+        return FirewallResult(
+            decision="require_confirmation",
+            riskLevel="medium",
+            reason="This request changes structured case data and must be prepared as a pending action for user confirmation.",
+            allowedTools=["database_action"],
+        )
+
+    externalActionWords = [
+        "send email",
+        "email the",
+        "send mail",
+        "gmail",
+        "schedule",
+        "calendar",
+        "create event",
+        "book meeting",
+        "invite",
+        "appointment",
+        "consultation",
+    ]
+
+    if hasAny(message, externalActionWords):
+        return FirewallResult(
+            decision="require_confirmation",
+            riskLevel="medium",
+            reason="This request may trigger an external Gmail or Google Calendar action and requires confirmation.",
+            allowedTools=["gmail", "calendar"],
+        )
+
+    unsafeWords = [
+        "fake evidence",
+        "forge",
+        "fabricate",
+        "backdate",
+        "lie",
+        "hide evidence",
+        "delete evidence",
+        "destroy evidence",
+        "misrepresent",
+    ]
+
+    if hasAny(message, unsafeWords):
+        return FirewallResult(
+            decision="refuse",
+            riskLevel="high",
+            reason="This request could involve fabrication, concealment, or misuse of case information.",
+            allowedTools=[],
+        )
 
     legalAdviceWords = [
         "should we sue",
         "should i sue",
-        "should they sue",
-        "should we settle",
-        "accept settlement",
-        "legal strategy",
+        "is this malpractice",
+        "what settlement",
+        "settlement amount",
+        "accept liability",
         "who is liable",
-        "is he liable",
-        "is she liable",
-        "case value",
-        "how much is this worth",
+        "legal strategy",
+        "file a lawsuit",
     ]
 
-    if any(word in message for word in unsafeWords):
+    if hasAny(message, legalAdviceWords):
         return FirewallResult(
             decision="refuse",
             riskLevel="high",
-            reason="The request appears to involve fabrication, exaggeration, or misleading case information.",
-            allowedTools=["none"],
-        )
-
-    if any(word in message for word in legalAdviceWords):
-        return FirewallResult(
-            decision="refuse",
-            riskLevel="high",
-            reason="The request asks for legal advice or legal strategy, which DocketIQ cannot provide.",
-            allowedTools=["none"],
-        )
-
-    if any(word in message for word in externalActionWords):
-        return FirewallResult(
-            decision="require_confirmation",
-            riskLevel="medium",
-            reason="The request requires an external action such as sending an email or creating a calendar event.",
-            allowedTools=["email_draft", "email_send", "calendar_create"],
+            reason="This asks for legal advice or legal strategy. I can only help with legal operations tasks.",
+            allowedTools=[],
         )
 
     prompt = f"""
-You are the DocketIQ LLM firewall for a personal-injury legal operations platform.
+You are DocketIQ's safety firewall.
 
-The frontend always sends the selected case id. So if the user says:
-- this case
-- current case
-- selected case
-- summarize this
-- summarize this case
-- what is missing
-- what happened
-- what should the case manager do next
+Classify this legal-operations assistant request.
 
-Treat that as referring to the selected case. Do NOT ask which file unless the user specifically asks to summarize a particular uploaded file but does not name it.
+Important:
+- The assistant may summarize case data, tasks, documents, timelines, reports, connected cases, and operational next steps.
+- The assistant may prepare pending Gmail, Calendar, or database actions only when the user confirms later.
+- The assistant must not provide legal advice, medical advice, settlement advice, liability decisions, or fabricated facts.
+- The assistant must not execute destructive database operations.
+- Questions about "this case", "current case", or "selected case" are allowed because the app already provides selected-case context.
 
-DocketIQ can help with:
-- Case summaries
-- Case status summaries
-- Intake information
-- Missing document tracking
-- Treatment timelines
-- Insurance and claim information
-- Calendar and communication status
-- Drafting operational emails
-- Scheduling operational calendar events
-- Attorney handoff summaries
-- Case-status questions grounded in available case data
+Return ONLY valid JSON.
 
-DocketIQ must refuse:
-- Legal advice, including whether someone should sue, settle, or accept a legal strategy
-- Medical advice or diagnosis
-- Requests to exaggerate injuries, fabricate records, alter evidence, or mislead insurers
-- Anything unrelated to legal operations
-- Answers that would require inventing facts not in the case record
-
-Decision meanings:
-- allow: safe to answer normally
-- allow_with_limits: answer, but include limitation that this is operational info only
-- ask_clarifying: only use this when the user's request cannot be resolved from the selected case context
-- refuse: unsafe or outside scope
-- require_confirmation: user asks to send email, create calendar invite, or take external action
-
-Allowed tools:
-- rag_search
-- document_summary
-- email_draft
-- email_send
-- calendar_create
-- report_generate
-- none
-
-Return ONLY valid JSON with this exact shape:
+JSON shape:
 {{
   "decision": "allow",
   "riskLevel": "low",
   "reason": "short reason",
-  "allowedTools": ["rag_search"]
+  "allowedTools": []
 }}
 
-User message:
+Allowed decision values:
+allow
+allow_with_limits
+ask_clarifying
+refuse
+require_confirmation
+
+User request:
 {userMessage}
 """
 
@@ -149,13 +194,13 @@ User message:
         return FirewallResult(
             decision=data.get("decision", "allow"),
             riskLevel=data.get("riskLevel", "low"),
-            reason=data.get("reason", "Safe legal operations request for selected case."),
-            allowedTools=data.get("allowedTools", ["rag_search"]),
+            reason=data.get("reason", "Allowed legal-operations request."),
+            allowedTools=data.get("allowedTools", []),
         )
     except Exception:
         return FirewallResult(
-            decision="allow_with_limits",
-            riskLevel="medium",
-            reason="Firewall fallback allowed this as an operational selected-case request.",
-            allowedTools=["rag_search"],
+            decision="allow",
+            riskLevel="low",
+            reason="Allowed by fallback legal-operations policy.",
+            allowedTools=[],
         )
